@@ -165,6 +165,9 @@ async def update_usd_rate(new_rate: float) -> bool:
     """Обновление курса USD"""
     try:
         async with async_session_maker() as session:
+            from database.models import CurrencyRate
+            from sqlalchemy import select, update
+            
             result = await session.execute(
                 select(CurrencyRate).where(CurrencyRate.currency == "usd")
             )
@@ -177,6 +180,7 @@ async def update_usd_rate(new_rate: float) -> bool:
                 session.add(rate)
             
             await session.commit()
+            print(f"DEBUG: Курс обновлён на {new_rate}")  
             return True
     except Exception as e:
         print(f"Ошибка обновления курса: {e}")

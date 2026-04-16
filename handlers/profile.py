@@ -138,8 +138,8 @@ async def deposit_usdt(callback: CallbackQuery, state: FSMContext):
     """Пополнение через USDT - запрос суммы"""
     await callback.message.edit_text(
         "💰 <b>Пополнение через USDT</b>\n\n"
-        "Введите сумму пополнения в рублях (от 100₽):\n\n"
-        "Пример: <code>500</code>\n\n"
+        "Введите сумму пополнения в USDT (от 1$):\n\n"
+        "Пример: <code>20</code>\n\n"
         "Чтобы отменить: /cancel",
         parse_mode="HTML"
     )
@@ -956,6 +956,27 @@ async def deposit_rub_disabled(callback: CallbackQuery):
     """RUB временно недоступен"""
     await callback.answer("❌ Пополнение в RUB временно недоступно. Используйте Stars или USDT.", show_alert=True)
 
+@router.callback_query(lambda c: c.data == "support")
+async def support(callback: CallbackQuery):
+    """Поддержка"""
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👨‍💻 Написать в поддержку", url="https://t.me/helpshadowroute")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_profile")]
+    ])
+    
+    await callback.message.edit_text(
+        "❓ <b>Поддержка</b>\n\n"
+        "Если у вас возникли вопросы или проблемы, вы можете обратиться в нашу службу поддержки:\n\n"
+        "📌 <b>Способы связи:</b>\n"
+        "• Нажмите на кнопку ниже, чтобы написать в поддержку\n"
+        "• Опишите вашу проблему, и мы постараемся помочь\n\n"
+        "⏰ <b>Время работы:</b> 24/7\n\n"
+        "<i>Пожалуйста, будьте вежливы и подробно описывайте вашу проблему.</i>",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+    
 @router.callback_query(lambda c: c.data.startswith("gift_confirm_"))
 async def gift_confirm(callback: CallbackQuery, state: FSMContext):
     """Подтверждение дарения подписки"""

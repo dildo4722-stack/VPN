@@ -176,7 +176,7 @@ async def pay_with_usdt(callback: CallbackQuery):
     
     result = await create_crypto_payment(
         user_id=callback.from_user.id,
-        amount_rub=amount_rub,
+        amount_usdt=selection["total_price_usdt"],  
         tariff_days=selection["days"],
         devices_count=selection["devices"]
     )

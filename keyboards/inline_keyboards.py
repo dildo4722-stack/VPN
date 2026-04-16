@@ -72,7 +72,7 @@ def get_payment_method_menu(amount: float):
     
     builder = InlineKeyboardBuilder()
     builder.button(text="💳 Рубли (RUB)", callback_data=f"pay_rub_{amount}")
-    builder.button(text="💰 USDT (криптовалюта)", callback_data=f"pay_usdt_{amount}")  # 👈 ЭТА КНОПКА
+    builder.button(text="💰 USDT (криптовалюта)", callback_data=f"pay_usdt_{amount}")  
     builder.button(text="⭐ Telegram Stars", callback_data=f"pay_stars_{amount}")
     builder.button(text="◀️ Назад", callback_data="back_to_tariffs")
     builder.adjust(1)

@@ -33,6 +33,7 @@ class User(Base):
     referrer = relationship("User", remote_side=[id], backref="referrals")
     referral_transactions = relationship("ReferralTransaction", foreign_keys="ReferralTransaction.user_id", back_populates="user")
     withdrawal_requests = relationship("WithdrawalRequest", back_populates="user")
+    agreed_to_terms = Column(Boolean, default=False)
 
 
 class ReferralTransaction(Base):
@@ -134,8 +135,8 @@ class CurrencyRate(Base):
     __tablename__ = "currency_rates"
     
     id = Column(Integer, primary_key=True)
-    currency = Column(String(20), unique=True)
-    rate_to_rub = Column(Float, nullable=False)
+    currency = Column(String(20), unique=True, nullable=False)
+    rate_to_rub = Column(Float, nullable=False, default=78.3)  
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class WithdrawalRequest(Base):
@@ -161,7 +162,7 @@ class Coupon(Base):
     discount_percent = Column(Integer, nullable=True)
     tariff_days = Column(Integer, nullable=True)
     devices = Column(Integer, nullable=True)
-    amount = Column(Float, nullable=True)  # 👈 ИЗМЕНИТЕ С nullable=False на nullable=True
+    amount = Column(Float, nullable=True) 
     max_uses = Column(Integer, default=1)
     used_count = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)

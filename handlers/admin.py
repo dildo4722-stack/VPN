@@ -9,6 +9,7 @@ from database.db_manager import async_session_maker, get_user, update_user_balan
 from database.models import User, Subscription, Payment, Coupon
 from sqlalchemy import select, update, func
 import asyncio
+from aiogram.filters import StateFilter
 
 router = Router()
 
@@ -566,7 +567,417 @@ async def send_rass(message: Message, state: FSMContext):
     
     await state.clear()
 
+# ==================== КУРС USD ====================
 
+@router.callback_query(lambda c: c.data == "admin_currency")
+async def admin_currency(callback: CallbackQuery):
+    """Изменение курса USD"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Доступ запрещен", show_alert=True)
+        return
+    
+    from database.db_manager import get_usd_rate
+    current_rate = await get_usd_rate()
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📈 Увеличить на 1", callback_data="usd_up_1")],
+        [InlineKeyboardButton(text="📉 Уменьшить на 1", callback_data="usd_down_1")],
+        [InlineKeyboardButton(text="📈 Увеличить на 5", callback_data="usd_up_5")],
+        [InlineKeyboardButton(text="📉 Уменьшить на 5", callback_data="usd_down_5")],
+        [InlineKeyboardButton(text="✏️ Установить вручную", callback_data="usd_set")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_panel")]
+    ])
+    
+    await callback.message.edit_text(
+        f"💱 <b>Курс USD к RUB</b>\n\n"
+        f"Текущий курс: <b>1$ = {current_rate:.2f}₽</b>\n\n"
+        f"Выберите действие:",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data.startswith("usd_up_"))
+async def usd_up(callback: CallbackQuery):
+    """Увеличение курса"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Доступ запрещен", show_alert=True)
+        return
+    
+    value = int(callback.data.split("_")[2])
+    
+    from database.db_manager import get_usd_rate, update_usd_rate
+    import importlib
+    import database.db_manager
+    
+    importlib.reload(database.db_manager)
+    
+    current_rate = await get_usd_rate()
+    new_rate = current_rate + value
+    
+    await update_usd_rate(new_rate)
+    
+    try:
+        from config import USD_TO_RUB
+        pass
+    except:
+        pass
+    
+    await callback.answer(f"✅ Курс увеличен на {value}. Теперь: 1$ = {new_rate:.2f}₽", show_alert=True)
+    await admin_currency(callback)
+
+
+@router.callback_query(lambda c: c.data.startswith("usd_down_"))
+async def usd_down(callback: CallbackQuery):
+    """Уменьшение курса"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Доступ запрещен", show_alert=True)
+        return
+    
+    value = int(callback.data.split("_")[2])
+    
+    from database.db_manager import get_usd_rate, update_usd_rate
+    current_rate = await get_usd_rate()
+    new_rate = max(1, current_rate - value)
+    
+    await update_usd_rate(new_rate)
+    
+    await callback.answer(f"✅ Курс уменьшен на {value}. Теперь: 1$ = {new_rate:.2f}₽", show_alert=True)
+    await admin_currency(callback)
+
+
+@router.callback_query(lambda c: c.data == "usd_set")
+async def usd_set(callback: CallbackQuery, state: FSMContext):
+    """Установка курса вручную"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Доступ запрещен", show_alert=True)
+        return
+    
+    from database.db_manager import get_usd_rate
+    current_rate = await get_usd_rate()
+    
+    # Создаём временное состояние
+    class CurrencyState(StatesGroup):
+        waiting_for_rate = State()
+    
+    await state.set_state(CurrencyState.waiting_for_rate)
+    
+    await callback.message.edit_text(
+        f"💱 <b>Установка курса USD</b>\n\n"
+        f"Текущий курс: 1$ = {current_rate:.2f}₽\n\n"
+        f"Отправьте новое значение курса (например: 85.5)\n\n"
+        f"Чтобы отменить: /cancel",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.message(StateFilter("CurrencyState.waiting_for_rate"))
+async def set_currency_rate(message: Message, state: FSMContext):
+    """Установка нового курса из сообщения"""
+    try:
+        new_rate = float(message.text)
+        
+        if new_rate < 1:
+            await message.answer("❌ Курс не может быть меньше 1")
+            return
+        
+        from database.db_manager import update_usd_rate
+        await update_usd_rate(new_rate)
+        
+        await message.answer(f"✅ Курс установлен: 1$ = {new_rate:.2f}₽")
+        
+        from handlers.admin import admin_panel
+        await admin_panel(message)
+        
+    except ValueError:
+        await message.answer("❌ Неверный формат. Отправьте число (например: 85.5)")
+    
+    await state.clear()
+
+
+# ==================== ЗАЯВКИ НА ВЫВОД ====================
+
+@router.callback_query(lambda c: c.data == "admin_withdrawals")
+async def admin_withdrawals(callback: CallbackQuery):
+    """Список заявок на вывод"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Доступ запрещен", show_alert=True)
+        return
+    
+    from database.models import WithdrawalRequest
+    
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(WithdrawalRequest, User)
+            .join(User)
+            .where(WithdrawalRequest.status == "pending")
+            .order_by(WithdrawalRequest.created_at.desc())
+        )
+        requests = result.all()
+    
+    if not requests:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_panel")]
+        ])
+        await callback.message.edit_text("📭 Нет активных заявок на вывод", reply_markup=keyboard)
+        await callback.answer()
+        return
+    
+    text = "💰 <b>ЗАЯВКИ НА ВЫВОД</b>\n\n"
+    for req, user in requests:
+        text += (
+            f"┌ <b>Заявка #{req.id}</b>\n"
+            f"├ 👤 ID: <code>{user.telegram_id}</code>\n"
+            f"├ 👤 Имя: {user.first_name or 'Не указано'}\n"
+            f"├ 💸 Сумма: {req.amount:.2f}₽\n"
+            f"├ 🏦 Способ: {req.method}\n"
+            f"├ 🧾 Реквизиты: {req.details}\n"
+            f"├ 📅 Создана: {req.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+            f"└ 🔘 /approve_{req.id} - одобрить | /reject_{req.id} - отклонить\n\n"
+        )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="admin_withdrawals")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_panel")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+
+# ==================== СТАТИСТИКА ====================
+
+@router.callback_query(lambda c: c.data == "admin_stats")
+async def admin_stats(callback: CallbackQuery):
+    """Статистика бота"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Доступ запрещен", show_alert=True)
+        return
+    
+    async with async_session_maker() as session:
+        from database.models import WithdrawalRequest
+        
+        total_users = await session.execute(select(func.count()).select_from(User))
+        total_users = total_users.scalar() or 0
+        
+        today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+        today_users = await session.execute(
+            select(func.count()).select_from(User).where(User.created_at >= today)
+        )
+        today_users = today_users.scalar() or 0
+        
+        active_subs = await session.execute(
+            select(func.count()).select_from(Subscription).where(Subscription.is_active == True)
+        )
+        active_subs = active_subs.scalar() or 0
+        
+        total_withdrawn = await session.execute(
+            select(func.sum(WithdrawalRequest.amount)).where(WithdrawalRequest.status == "approved")
+        )
+        total_withdrawn = total_withdrawn.scalar() or 0.0
+        
+        pending_withdrawals = await session.execute(
+            select(func.sum(WithdrawalRequest.amount)).where(WithdrawalRequest.status == "pending")
+        )
+        pending_withdrawals = pending_withdrawals.scalar() or 0.0
+        
+        total_referrals = await session.execute(
+            select(func.count()).select_from(User).where(User.referrer_id != None)
+        )
+        total_referrals = total_referrals.scalar() or 0
+        
+        total_payments = await session.execute(
+            select(func.sum(Payment.amount)).where(Payment.status == "success")
+        )
+        total_payments = total_payments.scalar() or 0.0
+        
+        withdrawal_requests_count = await session.execute(
+            select(func.count()).select_from(WithdrawalRequest)
+        )
+        withdrawal_requests_count = withdrawal_requests_count.scalar() or 0
+        
+        pending_count = await session.execute(
+            select(func.count()).select_from(WithdrawalRequest).where(WithdrawalRequest.status == "pending")
+        )
+        pending_count = pending_count.scalar() or 0
+    
+    text = (
+        "📊 <b>СТАТИСТИКА БОТА</b>\n\n"
+        "👥 <b>Пользователи:</b>\n"
+        f"├ Всего: {total_users}\n"
+        f"├ За сегодня: {today_users}\n"
+        f"└ Рефералов: {total_referrals}\n\n"
+        "💎 <b>Подписки:</b>\n"
+        f"└ Активных: {active_subs}\n\n"
+        "💰 <b>Финансы:</b>\n"
+        f"├ Всего пополнений: {total_payments:.2f}₽\n"
+        f"├ Выплачено: {total_withdrawn:.2f}₽\n"
+        f"└ Ожидает выплаты: {pending_withdrawals:.2f}₽\n\n"
+        "📋 <b>Заявки на вывод:</b>\n"
+        f"├ Всего: {withdrawal_requests_count}\n"
+        f"└ В обработке: {pending_count}"
+    )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_panel")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+
+# ==================== ПОЛЬЗОВАТЕЛИ ====================
+
+@router.callback_query(lambda c: c.data == "admin_users")
+async def admin_users(callback: CallbackQuery):
+    """Список пользователей"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Доступ запрещен", show_alert=True)
+        return
+    
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(User).order_by(User.created_at.desc()).limit(50)
+        )
+        users = result.scalars().all()
+    
+    text = "👥 <b>ПОСЛЕДНИЕ 50 ПОЛЬЗОВАТЕЛЕЙ</b>\n\n"
+    for user in users:
+        text += (
+            f"┌ <b>ID:</b> <code>{user.telegram_id}</code>\n"
+            f"├ <b>Имя:</b> {user.first_name or 'Не указано'}\n"
+            f"├ <b>Баланс:</b> {user.balance_rub:.2f}₽ | {user.balance_stars}⭐ | {user.balance_usdt:.2f}💎\n"
+            f"├ <b>Рефералов:</b> {user.referrer_id and 'Приглашен' or 'Нет'}\n"
+            f"├ <b>Дата:</b> {user.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+            f"└ {'✅ Принял соглашение' if user.agreed_to_terms else '❌ Не принял'}\n\n"
+        )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_panel")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+@router.message(lambda msg: msg.text and msg.text.startswith("/approve_"))
+async def approve_withdrawal(message: Message):
+    """Подтверждение заявки на вывод"""
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Доступ запрещен")
+        return
+    
+    try:
+        request_id = int(message.text.split("_")[1])
+    except:
+        await message.answer("❌ Неверный формат. Используйте: /approve_123")
+        return
+    
+    from database.models import WithdrawalRequest
+    
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(WithdrawalRequest, User)
+            .join(User)
+            .where(WithdrawalRequest.id == request_id)
+        )
+        req_user = result.first()
+        
+        if not req_user:
+            await message.answer(f"❌ Заявка #{request_id} не найдена")
+            return
+        
+        req, user = req_user
+        
+        if req.status != "pending":
+            await message.answer(f"❌ Заявка #{request_id} уже обработана")
+            return
+        
+        # Обновляем статус
+        await session.execute(
+            update(WithdrawalRequest)
+            .where(WithdrawalRequest.id == request_id)
+            .values(status="approved", processed_at=datetime.utcnow())
+        )
+        
+        # Списываем баланс
+        await session.execute(
+            update(User)
+            .where(User.id == user.id)
+            .values(balance_rub=User.balance_rub - req.amount)
+        )
+        
+        await session.commit()
+    
+    # Уведомляем пользователя
+    try:
+        await message.bot.send_message(
+            chat_id=user.telegram_id,
+            text=f"✅ <b>Заявка на вывод одобрена!</b>\n\n"
+                 f"💰 Сумма: {req.amount:.2f}₽\n"
+                 f"🏦 Способ: {req.method}",
+            parse_mode="HTML"
+        )
+    except:
+        pass
+    
+    await message.answer(f"✅ Заявка #{request_id} одобрена")
+
+
+@router.message(lambda msg: msg.text and msg.text.startswith("/reject_"))
+async def reject_withdrawal(message: Message):
+    """Отклонение заявки на вывод"""
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Доступ запрещен")
+        return
+    
+    try:
+        request_id = int(message.text.split("_")[1])
+    except:
+        await message.answer("❌ Неверный формат. Используйте: /reject_123")
+        return
+    
+    from database.models import WithdrawalRequest
+    
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(WithdrawalRequest, User)
+            .join(User)
+            .where(WithdrawalRequest.id == request_id)
+        )
+        req_user = result.first()
+        
+        if not req_user:
+            await message.answer(f"❌ Заявка #{request_id} не найдена")
+            return
+        
+        req, user = req_user
+        
+        if req.status != "pending":
+            await message.answer(f"❌ Заявка #{request_id} уже обработана")
+            return
+        
+        await session.execute(
+            update(WithdrawalRequest)
+            .where(WithdrawalRequest.id == request_id)
+            .values(status="rejected", processed_at=datetime.utcnow())
+        )
+        await session.commit()
+    
+    # Уведомляем пользователя
+    try:
+        await message.bot.send_message(
+            chat_id=user.telegram_id,
+            text=f"❌ <b>Заявка на вывод отклонена!</b>\n\n"
+                 f"💰 Сумма: {req.amount:.2f}₽\n\n"
+                 f"Причина: обратитесь в поддержку",
+            parse_mode="HTML"
+        )
+    except:
+        pass
+    
+    await message.answer(f"❌ Заявка #{request_id} отклонена")
 
 @router.callback_query(lambda c: c.data == "admin_panel")
 async def back_to_admin_panel(callback: CallbackQuery):

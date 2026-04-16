@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Optional, Dict, Any
 from sqlalchemy import select, func, update
 
-from database.db_manager import async_session_maker  # 👈 ДОБАВИТЬ ЭТУ СТРОКУ
+from database.db_manager import async_session_maker  
 from database.models import User, ReferralTransaction
 
 logger = logging.getLogger(__name__)
