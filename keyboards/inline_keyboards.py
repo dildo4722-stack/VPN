@@ -32,6 +32,7 @@ def get_profile_menu():
     builder.button(text="🎁 Подарить", callback_data="gift_subscription")
     builder.button(text="🤝 Партнерская программа", callback_data="referral_program")
     builder.button(text="❓ Поддержка", callback_data="support")
+    builder.button(text="📜 Пользовательское соглашение", callback_data="user_agreement")
     builder.adjust(1)
     return builder.as_markup()
 

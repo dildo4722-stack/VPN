@@ -976,6 +976,27 @@ async def support(callback: CallbackQuery):
         parse_mode="HTML"
     )
     await callback.answer()
+
+@router.callback_query(lambda c: c.data == "user_agreement")
+async def user_agreement(callback: CallbackQuery):
+    """Показать пользовательское соглашение и политику конфиденциальности"""
+    
+    text = (
+        "📜 <b>ДОКУМЕНТЫ</b>\n\n"
+        "Ознакомьтесь с основными документами:\n\n"
+        "▫️ <b>Пользовательское соглашение</b> — правила использования сервиса\n"
+        "▫️ <b>Политика конфиденциальности</b> — как мы обрабатываем ваши данные\n\n"
+        "Используя бота, вы автоматически соглашаетесь с условиями."
+    )
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📖 Пользовательское соглашение", url="https://telegra.ph/Polzovatelskoe-soglashenie-04-01-19")],
+        [InlineKeyboardButton(text="🔒 Политика конфиденциальности", url="https://telegra.ph/Politika-konfidencialnosti-04-01-26")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_profile")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
     
 @router.callback_query(lambda c: c.data.startswith("gift_confirm_"))
 async def gift_confirm(callback: CallbackQuery, state: FSMContext):
