@@ -17,6 +17,9 @@ from services.referral_service import (
 )
 
 router = Router()
+temp_payments = {}
+temp_payment_data = {}
+
 
 class GiftStates(StatesGroup):
     waiting_for_user_id = State()
@@ -39,19 +42,35 @@ class ChangeCodeStates(StatesGroup):
 
 
 async def show_profile(callback: CallbackQuery):
-    from database.db_manager import get_usd_rate
+    from database.db_manager import get_usd_rate, async_session_maker
+    from database.models import User
+    from sqlalchemy import select
     
     user = await get_user(callback.from_user.id)
     subscription = await get_active_subscription(user.id)
     usd_rate = await get_usd_rate()
     
-    rub = user.balance
-    usdt = rub / usd_rate if usd_rate > 0 else 0
-    stars = int(rub)
+    # 👇 ПРЯМОЙ ЗАПРОС К БД
+    async with async_session_maker() as session:
+        result = await session.execute(
+            select(User).where(User.telegram_id == callback.from_user.id)
+        )
+        full_user = result.scalar_one_or_none()
+        
+        if full_user:
+            rub = full_user.balance_rub
+            stars = full_user.balance_stars
+            usdt = full_user.balance_usdt
+            print(f"DEBUG: rub={rub}, stars={stars}, usdt={usdt}")  # 👈 ДОБАВЬТЕ
+        else:
+            rub = 0
+            stars = 0
+            usdt = 0
+            print("DEBUG: Пользователь не найден в БД")
     
     profile_text = format_profile_message(user, subscription)
     
-    balance_text = f"\n\n💳 RUB: {rub:.2f} | 💎 USDT: {usdt:.2f} | ⭐ Stars: {stars}"
+    balance_text = f"\n\n💳 RUB: {rub:.2f} | ⭐ Stars: {stars} | 💎 USDT: {usdt:.2f}"
     
     await callback.message.edit_text(
         profile_text + balance_text,
@@ -59,7 +78,6 @@ async def show_profile(callback: CallbackQuery):
         parse_mode="HTML"
     )
     await callback.answer()
-
 
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from database.db_manager import get_user, get_usd_rate
@@ -104,7 +122,7 @@ async def deposit_balance(callback: CallbackQuery):
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="⭐ Telegram Stars", callback_data="deposit_stars")],
         [InlineKeyboardButton(text="💰 USDT (криптовалюта)", callback_data="deposit_usdt")],
-        [InlineKeyboardButton(text="💳 Рубли (RUB) 🔜", callback_data="deposit_rub_disabled")],
+        [InlineKeyboardButton(text="💳 Рубли (RUB)", callback_data="deposit_rub")],  # 👈 ИСПРАВЛЕНО
         [InlineKeyboardButton(text="◀️ Назад", callback_data="show_balance")]
     ])
     
@@ -114,56 +132,17 @@ async def deposit_balance(callback: CallbackQuery):
 
 @router.callback_query(lambda c: c.data == "deposit_rub")
 async def deposit_rub(callback: CallbackQuery, state: FSMContext):
-    """Пополнение в рублях - запрос суммы"""
+    """Пополнение в рублях - сначала запрос суммы, потом выбор метода"""
     await callback.message.edit_text(
         "💳 <b>Пополнение в RUB</b>\n\n"
-        "Введите сумму пополнения в рублях (от 100₽):\n\n"
-        "Пример: <code>500</code>\n\n"
-        "Чтобы отменить: /cancel",
+        "Введите сумму пополнения (от 10₽):\n\n"
+        "Пример: <code>500</code>",
         parse_mode="HTML"
     )
     
     await state.set_state(DepositStates.waiting_for_amount)
     await state.update_data(method="rub")
     await callback.answer()
-
-@router.callback_query(lambda c: c.data == "deposit_rub_disabled")
-async def deposit_rub_disabled(callback: CallbackQuery):
-    """RUB временно недоступен"""
-    await callback.answer("❌ Пополнение в RUB временно недоступно. Используйте Stars или USDT.", show_alert=True)
-
-
-@router.callback_query(lambda c: c.data.startswith("deposit_usdt"))
-async def deposit_usdt(callback: CallbackQuery, state: FSMContext):
-    """Пополнение через USDT - запрос суммы"""
-    await callback.message.edit_text(
-        "💰 <b>Пополнение через USDT</b>\n\n"
-        "Введите сумму пополнения в USDT (от 1$):\n\n"
-        "Пример: <code>20</code>\n\n"
-        "Чтобы отменить: /cancel",
-        parse_mode="HTML"
-    )
-    
-    await state.set_state(DepositStates.waiting_for_amount)
-    await state.update_data(method="usdt")
-    await callback.answer()
-
-
-@router.callback_query(lambda c: c.data.startswith("deposit_stars"))
-async def deposit_stars(callback: CallbackQuery, state: FSMContext):
-    """Пополнение через Stars - запрос суммы в Stars"""
-    await callback.message.edit_text(
-        "⭐ <b>Пополнение через Telegram Stars</b>\n\n"
-        "Введите сумму пополнения в Stars (от 50 Stars):\n\n"
-        "Пример: <code>100</code>\n\n"
-        "Чтобы отменить: /cancel",
-        parse_mode="HTML"
-    )
-    
-    await state.set_state(DepositStates.waiting_for_amount)
-    await state.update_data(method="stars")
-    await callback.answer()
-
 
 @router.message(DepositStates.waiting_for_amount)
 async def process_deposit_amount(message: Message, state: FSMContext):
@@ -174,18 +153,32 @@ async def process_deposit_amount(message: Message, state: FSMContext):
         method = data.get("method")
         
         if method == "rub":
-            if amount < 100:
-                await message.answer("❌ Минимальная сумма пополнения 100₽")
+            rub_amount = amount
+            
+            if rub_amount < 10:
+                await message.answer("❌ Минимальная сумма пополнения 10₽")
                 return
             
+            # Сохраняем сумму в глобальный словарь (по user_id)
+            temp_payment_data[message.from_user.id] = {"amount": rub_amount}
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📱 СБП (QR-код)", callback_data="rub_method_2")],
+                [InlineKeyboardButton(text="🌍 Криптовалюта", callback_data="rub_method_13")],
+                [InlineKeyboardButton(text="◀️ Назад", callback_data="show_balance")]
+            ])
+            
             await message.answer(
-                "❌ Пополнение в RUB временно недоступно.\nИспользуйте Stars или USDT.",
-                reply_markup=get_back_button("show_balance", "◀️ Назад")
+                f"💰 Сумма: {rub_amount:.2f} ₽\n\n"
+                f"Выберите способ оплаты:",
+                reply_markup=keyboard,
+                parse_mode="HTML"
             )
         
         elif method == "usdt":
-            if amount < 0.5:
-                await message.answer("❌ Минимальная сумма пополнения 0,5 USDT")
+            print(f"DEBUG USDT: amount={amount}")
+            if amount < 0.1:
+                await message.answer("❌ Минимальная сумма пополнения 0,1 USDT")
                 return
             
             from services.payment_service import create_crypto_payment
@@ -196,6 +189,9 @@ async def process_deposit_amount(message: Message, state: FSMContext):
                 devices_count=0
             )
             
+            print(f"DEBUG USDT result: {result}")
+
+
             if result["success"]:
                 keyboard = InlineKeyboardMarkup(inline_keyboard=[
                     [InlineKeyboardButton(text="💎 Оплатить USDT", url=result['pay_url'])],
@@ -215,9 +211,10 @@ async def process_deposit_amount(message: Message, state: FSMContext):
         
         elif method == "stars":
             stars_amount = int(amount)
+            print(f"DEBUG Stars: stars_amount={stars_amount}")
             
-            if stars_amount < 50:
-                await message.answer("❌ Минимальная сумма пополнения 50 Stars")
+            if stars_amount < 1:
+                await message.answer("❌ Минимальная сумма пополнения 1 Stars")
                 return
             
             prices = [LabeledPrice(label="Пополнение Stars", amount=stars_amount)]
@@ -235,102 +232,158 @@ async def process_deposit_amount(message: Message, state: FSMContext):
                 ])
             )
         
-        await state.clear()
+        await state.clear()  
         
     except ValueError:
         await message.answer("❌ Введите число")
 
-@router.callback_query(lambda c: c.data.startswith("check_deposit_usdt_"))
-async def check_deposit_usdt(callback: CallbackQuery):
-    """Проверка оплаты USDT для пополнения"""
-    parts = callback.data.split("_")
-    invoice_id = int(parts[3])
-    amount = float(parts[4])
+
+@router.callback_query(lambda c: c.data.startswith("rub_method_"))
+async def rub_process_payment(callback: CallbackQuery, state: FSMContext):
+    """Обработка выбранного способа оплаты"""
+    method_id = int(callback.data.split("_")[2])
     
-    from services.payment_service import check_crypto_payment
-    from database.db_manager import get_user, update_user_balance_usdt
+    payment_data = temp_payment_data.get(callback.from_user.id)
     
-    await callback.message.edit_text("⏳ Проверяем оплату...", reply_markup=None)
+    if not payment_data:
+        await callback.answer("Ошибка: попробуйте снова", show_alert=True)
+        await callback.message.edit_text(
+            "💳 <b>Пополнение в RUB</b>\n\n"
+            "Введите сумму пополнения (от 10₽):\n\n"
+            "Пример: <code>500</code>",
+            parse_mode="HTML"
+        )
+        await state.set_state(DepositStates.waiting_for_amount)
+        await state.update_data(method="rub")
+        return
     
-    result = await check_crypto_payment(invoice_id)
+    rub_amount = payment_data.get("amount")
     
-    if result["status"] == "paid":
-        user = await get_user(callback.from_user.id)
-        if user:
-            await update_user_balance_usdt(user.id, amount)
-            await callback.message.edit_text(
-                f"✅ <b>Баланс пополнен!</b>\n\n"
-                f"💎 Сумма: +{amount} USDT",
-                reply_markup=get_back_button("show_balance", "◀️ Назад"),
-                parse_mode="HTML"
-            )
-    elif result["status"] == "active":
+    from services.platega_service import platega
+    
+    order_id = f"{callback.from_user.id}_{int(time.time())}"
+    
+    result = await platega.create_invoice(
+        amount=rub_amount,
+        order_id=order_id,
+        description="Пополнение баланса VPN бота",
+        telegram_id=callback.from_user.id,
+        payment_method=method_id
+    )
+    
+    print(f"DEBUG: Результат create_invoice: {result}")
+    
+    if result.get("status") == "success":
+        # Сохраняем transaction_id (UUID), а не order_id
+        temp_payments[result["transaction_id"]] = {
+            "user_id": callback.from_user.id,
+            "amount": rub_amount,
+            "payment_method": "platega",
+            "order_id": order_id
+        }
+        
+        # Очищаем временные данные
+        if callback.from_user.id in temp_payment_data:
+            del temp_payment_data[callback.from_user.id]
+        
+        # Кнопка "Я оплатил" должна передавать transaction_id
         keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Проверить еще раз", callback_data=f"check_deposit_usdt_{invoice_id}_{amount}")],
+            [InlineKeyboardButton(text="💳 Оплатить", url=result['payment_url'])],
+            [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"check_platega_{result['transaction_id']}")],
             [InlineKeyboardButton(text="◀️ Назад", callback_data="show_balance")]
         ])
-        await callback.message.edit_text("⏳ Платеж еще не обработан. Оплатите и проверьте еще раз.", reply_markup=keyboard)
+        
+        method_names = {
+            2: "СБП (QR-код)",
+            11: "Банковская карта",
+            13: "Криптовалюта",
+            12: "Международная карта"
+        }
+        method_name = method_names.get(method_id, "Оплата")
+        
+        await callback.message.edit_text(
+            f"💳 <b>Счет на оплату</b>\n\n"
+            f"💰 Сумма: {rub_amount:.2f} ₽\n"
+            f"💳 Способ: {method_name}\n\n"
+            f"1. Нажмите «Оплатить»\n"
+            f"2. Оплатите удобным способом\n"
+            f"3. Нажмите «Я оплатил»\n\n"
+            f"<i>Счет действителен 1 час</i>",
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
     else:
-        await callback.message.edit_text("❌ Счет не найден или истек", reply_markup=get_back_button("show_balance", "◀️ Назад"))
+        error_msg = result.get('message', 'Неизвестная ошибка')
+        await callback.message.edit_text(
+            f"❌ Ошибка создания платежа: {error_msg}\n\n"
+            f"Попробуйте другой способ оплаты.",
+            reply_markup=get_back_button("show_balance", "◀️ Назад")
+        )
     
     await callback.answer()
 
-
-@router.message(F.successful_payment)
-async def successful_deposit(message: Message):
-    """Обработка успешной оплаты Stars для пополнения"""
-    payment = message.successful_payment
-    payload = payment.invoice_payload
-    amount = int(payment.total_amount)  
-    
-    from database.db_manager import get_user, update_user_balance_stars
-    
-    if payload.startswith("deposit_stars"):
-        parts = payload.split("_")
-        user_id = int(parts[2])
-        stars_amount = int(parts[3]) if len(parts) > 3 else amount
-        
-        if user_id == message.from_user.id:
-            user = await get_user(user_id)
-            if user:
-                await update_user_balance_stars(user.id, stars_amount)
-                await message.answer(
-                    f"✅ <b>Баланс пополнен!</b>\n\n"
-                    f"⭐ Сумма: +{stars_amount} Stars",
-                    parse_mode="HTML"
-                )
-
-
 @router.callback_query(lambda c: c.data == "deposit_history")
 async def deposit_history(callback: CallbackQuery):
-    """История пополнений"""
+    """История пополнений баланса"""
     from database.models import Payment
     from database.db_manager import async_session_maker
-    from sqlalchemy import select
+    from sqlalchemy import select, desc
     
     async with async_session_maker() as session:
+        # Получаем все успешные платежи пользователя
         result = await session.execute(
             select(Payment).where(
                 Payment.user_id == callback.from_user.id,
                 Payment.status == "success"
-            ).order_by(Payment.created_at.desc()).limit(20)
+            ).order_by(desc(Payment.created_at)).limit(50)
         )
         payments = result.scalars().all()
     
     if not payments:
-        text = "📜 <b>История пополнений</b>\n\n<blockquote>Пополнений пока нет</blockquote>"
+        text = "📜 <b>История пополнений</b>\n\n<blockquote>❌ Пополнений пока нет</blockquote>\n\n💡 Чтобы пополнить баланс, нажмите «Пополнить баланс» в меню."
     else:
-        text = "📜 <b>История пополнений</b>\n\n"
-        for p in payments:
-            text += f"<blockquote>✅ +{p.amount:.2f} ₽ | {p.payment_method}\n📅 {p.created_at.strftime('%d.%m.%Y %H:%M')}</blockquote>\n"
+        text = "📜 <b>ИСТОРИЯ ПОПОЛНЕНИЙ</b>\n\n"
+        
+        # Считаем общую сумму
+        total_amount = sum(p.amount for p in payments)
+        
+        text += f"<blockquote>📊 <b>Всего пополнено:</b> {total_amount:.2f} ₽</blockquote>\n\n"
+        
+        for i, p in enumerate(payments, 1):
+            # Форматируем дату
+            date_str = p.created_at.strftime('%d.%m.%Y в %H:%M')
+            
+            # Иконка в зависимости от метода оплаты
+            if p.payment_method == "stars":
+                method_icon = "⭐"
+                method_name = "Stars"
+            elif p.payment_method == "crypto":
+                method_icon = "💎"
+                method_name = "USDT"
+            elif p.payment_method == "platega":
+                method_icon = "💳"
+                method_name = "Банковская карта / СБП"
+            else:
+                method_icon = "💰"
+                method_name = p.payment_method or "Другой"
+            
+            text += (
+                f"<blockquote>"
+                f"┌ <b>#{i}</b> {method_icon} {method_name}\n"
+                f"├ 💰 Сумма: <b>+{p.amount:.2f} ₽</b>\n"
+                f"├ 🆔 Транзакция: <code>{p.external_id[:12]}...</code>\n"
+                f"└ 📅 {date_str}\n"
+                f"</blockquote>\n"
+            )
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔄 Обновить", callback_data="deposit_history")],
+        [InlineKeyboardButton(text="💰 Пополнить баланс", callback_data="deposit_balance")],
         [InlineKeyboardButton(text="◀️ Назад", callback_data="show_balance")]
     ])
     
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
-
 
 @router.callback_query(lambda c: c.data == "activate_coupon")
 async def activate_coupon(callback: CallbackQuery, state: FSMContext):
@@ -951,10 +1004,10 @@ async def gift_select_tariff(callback: CallbackQuery, state: FSMContext):
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data == "deposit_rub_disabled")
-async def deposit_rub_disabled(callback: CallbackQuery):
-    """RUB временно недоступен"""
-    await callback.answer("❌ Пополнение в RUB временно недоступно. Используйте Stars или USDT.", show_alert=True)
+#@router.callback_query(lambda c: c.data == "deposit_rub_disabled")
+#async def deposit_rub_disabled(callback: CallbackQuery):
+   # """RUB временно недоступен"""
+   # await callback.answer("❌ Пополнение в RUB временно недоступно. Используйте Stars или USDT.", show_alert=True)
 
 @router.callback_query(lambda c: c.data == "support")
 async def support(callback: CallbackQuery):
@@ -997,7 +1050,83 @@ async def user_agreement(callback: CallbackQuery):
     
     await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
     await callback.answer()
+
+@router.callback_query(lambda c: c.data.startswith("check_platega_"))
+async def check_platega_payment(callback: CallbackQuery):
+    """Проверка оплаты через Platega"""
+    transaction_id = callback.data.split("_")[2]  # теперь это transaction_id
     
+    from services.platega_service import platega
+    from database.db_manager import get_user, update_user_balance_rub
+    
+    await callback.message.edit_text("⏳ Проверяем статус платежа...", reply_markup=None)
+    
+    result = await platega.check_payment(transaction_id)
+    
+    if result.get("status") == "success" and result.get("paid"):
+        payment_data = temp_payments.get(transaction_id)
+        if payment_data:
+            user = await get_user(payment_data["user_id"])
+            if user:
+                await update_user_balance_rub(user.id, payment_data["amount"])
+                
+                await callback.message.edit_text(
+                    f"✅ <b>Баланс пополнен!</b>\n\n"
+                    f"💰 Сумма: {payment_data['amount']:.2f} ₽",
+                    reply_markup=get_back_button("show_balance", "◀️ Назад"),
+                    parse_mode="HTML"
+                )
+                
+                if transaction_id in temp_payments:
+                    del temp_payments[transaction_id]
+    elif result.get("transaction_status") == "PENDING":
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Проверить еще раз", callback_data=f"check_platega_{transaction_id}")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="show_balance")]
+        ])
+        await callback.message.edit_text(
+            "⏳ Платеж еще не обработан. Оплатите и нажмите «Проверить еще раз».",
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    else:
+        await callback.message.edit_text(
+            "❌ Платеж не найден или истек",
+            reply_markup=get_back_button("show_balance", "◀️ Назад")
+        )
+    
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data == "deposit_usdt")
+async def deposit_usdt(callback: CallbackQuery, state: FSMContext):
+    print("DEBUG: deposit_usdt ВЫЗВАН!")  # 👈 ДОЛЖНО ВЫВЕСТИСЬ
+    await callback.message.edit_text(
+        "💰 <b>Пополнение через USDT</b>\n\n"
+        "Введите сумму пополнения в USDT (от 1$):\n\n"
+        "Пример: <code>20</code>\n\n"
+        "Чтобы отменить: /cancel",
+        parse_mode="HTML"
+    )
+    
+    await state.set_state(DepositStates.waiting_for_amount)
+    await state.update_data(method="usdt")
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data == "deposit_stars")
+async def deposit_stars(callback: CallbackQuery, state: FSMContext):
+    print("DEBUG: deposit_stars ВЫЗВАН!")  # 👈 ДОЛЖНО ВЫВЕСТИСЬ
+    await callback.message.edit_text(
+        "⭐ <b>Пополнение через Telegram Stars</b>\n\n"
+        "Введите сумму пополнения в Stars (от 50 Stars):\n\n"
+        "Пример: <code>100</code>\n\n"
+        "Чтобы отменить: /cancel",
+        parse_mode="HTML"
+    )
+    
+    await state.set_state(DepositStates.waiting_for_amount)
+    await state.update_data(method="stars")
+    await callback.answer()
 @router.callback_query(lambda c: c.data.startswith("gift_confirm_"))
 async def gift_confirm(callback: CallbackQuery, state: FSMContext):
     """Подтверждение дарения подписки"""

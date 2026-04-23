@@ -37,13 +37,13 @@ def get_profile_menu():
     return builder.as_markup()
 
 
-def get_tariff_menu(selected_devices: int = 1):
+def get_tariff_menu():
     """Меню выбора тарифа"""
     builder = InlineKeyboardBuilder()
-    builder.button(text="📅 1 день - 10₽", callback_data="tariff_1")
-    builder.button(text="📅 30 дней - 150₽", callback_data="tariff_30")
-    builder.button(text="📅 90 дней - 400₽", callback_data="tariff_90")
-    builder.button(text="📅 180 дней - 600₽", callback_data="tariff_180")
+    builder.button(text="📅 1 день - 9₽", callback_data="tariff_1")
+    builder.button(text="📅 30 дней - 149₽", callback_data="tariff_30")
+    builder.button(text="📅 90 дней - 399₽", callback_data="tariff_90")
+    builder.button(text="📅 180 дней - 599₽", callback_data="tariff_180")
     builder.button(text="📅 360 дней - 999₽", callback_data="tariff_360")
     builder.button(text="◀️ Назад", callback_data="back_to_profile")
     builder.adjust(1)
@@ -58,7 +58,7 @@ def get_device_count_menu(tariff_days: int, base_price: float, device_price: flo
         total_price = base_price + (devices - 1) * device_price
         status = "✅" if devices == current_devices else "📌"
         builder.button(
-            text=f"{status} {devices} устройств - {total_price}₽",
+            text=f"{status} {devices} устройств - {total_price:.0f}₽",
             callback_data=f"devices_{tariff_days}_{devices}"
         )
     
@@ -69,11 +69,9 @@ def get_device_count_menu(tariff_days: int, base_price: float, device_price: flo
 
 def get_payment_method_menu(amount: float):
     """Меню выбора способа оплаты"""
-    from aiogram.utils.keyboard import InlineKeyboardBuilder
-    
     builder = InlineKeyboardBuilder()
     builder.button(text="💳 Рубли (RUB)", callback_data=f"pay_rub_{amount}")
-    builder.button(text="💰 USDT (криптовалюта)", callback_data=f"pay_usdt_{amount}")  
+    builder.button(text="💰 USDT (криптовалюта)", callback_data=f"pay_usdt_{amount}")
     builder.button(text="⭐ Telegram Stars", callback_data=f"pay_stars_{amount}")
     builder.button(text="◀️ Назад", callback_data="back_to_tariffs")
     builder.adjust(1)

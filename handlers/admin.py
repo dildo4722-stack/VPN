@@ -23,6 +23,11 @@ class CreateCouponStates(StatesGroup):
     waiting_for_uses = State()  
 
 
+class EditTariffStates(StatesGroup):
+    waiting_for_tariff_days = State()  # выбор тарифа
+    waiting_for_devices = State()  # ввод устройств и цен
+
+
 class AddBalanceStates(StatesGroup):
     waiting_for_user_id = State()
     waiting_for_currency = State()
@@ -53,6 +58,7 @@ async def admin_panel(message: Message):
         [InlineKeyboardButton(text="💱 Курс USD", callback_data="admin_currency")],
         [InlineKeyboardButton(text="🎫 Создать купон", callback_data="admin_create_coupon")],
         [InlineKeyboardButton(text="➕ Пополнить баланс", callback_data="admin_add_balance")],
+        [InlineKeyboardButton(text="💸 Управление тарифами", callback_data="admin_edit_tariffs")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_rass")],
         [InlineKeyboardButton(text="📋 Список купонов", callback_data="admin_list_coupons")]
     ])
@@ -979,6 +985,147 @@ async def reject_withdrawal(message: Message):
     
     await message.answer(f"❌ Заявка #{request_id} отклонена")
 
+# ==================== УПРАВЛЕНИЕ ТАРИФАМИ ====================
+
+@router.callback_query(lambda c: c.data == "admin_edit_tariffs")
+async def admin_edit_tariffs(callback: CallbackQuery, state: FSMContext):
+    """Управление тарифами - выбор тарифа для редактирования"""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Доступ запрещен", show_alert=True)
+        return
+    
+    from config import TARIFFS
+    
+    text = "💸 <b>Управление тарифами</b>\n\n"
+    text += "Текущие тарифы:\n\n"
+    
+    for days, info in TARIFFS.items():
+        text += f"📅 {days} дней: {info['price']}₽ (база), +{info['device_price']}₽ за устройство\n"
+    
+    text += "\nВыберите тариф для редактирования:"
+    
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📅 1 день", callback_data="edit_tariff_1")],
+        [InlineKeyboardButton(text="📅 30 дней", callback_data="edit_tariff_30")],
+        [InlineKeyboardButton(text="📅 90 дней", callback_data="edit_tariff_90")],
+        [InlineKeyboardButton(text="📅 180 дней", callback_data="edit_tariff_180")],
+        [InlineKeyboardButton(text="📅 360 дней", callback_data="edit_tariff_360")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_panel")]
+    ])
+    
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data.startswith("edit_tariff_"))
+async def edit_tariff_select(callback: CallbackQuery, state: FSMContext):
+    """Выбор тарифа для редактирования"""
+    tariff_days = int(callback.data.split("_")[2])
+    
+    await state.update_data(tariff_days=tariff_days)
+    await state.set_state(EditTariffStates.waiting_for_devices)
+    
+    await callback.message.edit_text(
+        f"📅 <b>Редактирование тарифа: {tariff_days} дней</b>\n\n"
+        f"Введите данные в формате:\n"
+        f"<code>цена_за_1_устройство,цена_за_2_устройства,цена_за_3_устройства,...</code>\n\n"
+        f"Пример для 1-6 устройств:\n"
+        f"<code>10,20,30,40,50,60</code>\n\n"
+        f"Или введите: <code>базовая_цена,цена_за_дополнительное</code>\n"
+        f"Пример: <code>10,10</code> (база 10₽, +10₽ за каждое доп. устройство)\n\n"
+        f"Чтобы отменить: /cancel",
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.message(EditTariffStates.waiting_for_devices)
+async def save_tariff_devices(message: Message, state: FSMContext):
+    """Сохранение новых цен для тарифа"""
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ Доступ запрещен")
+        return
+    
+    data = await state.get_data()
+    tariff_days = data.get("tariff_days")
+    
+    try:
+        parts = message.text.strip().split(',')
+        
+        if len(parts) == 2:
+            # Формат: базовая_цена,цена_за_дополнительное
+            base_price = float(parts[0])
+            device_price = float(parts[1])
+        elif len(parts) >= 1:
+            # Формат: цены для 1-6 устройств
+            prices = [float(p.strip()) for p in parts]
+            base_price = prices[0] if len(prices) > 0 else 10
+            if len(prices) >= 2:
+                device_price = prices[1] - prices[0]  # разница между 2 и 1 устройством
+            else:
+                device_price = base_price
+        else:
+            await message.answer("❌ Неверный формат. Попробуйте ещё раз.")
+            return
+        
+        if base_price < 0 or device_price < 0:
+            await message.answer("❌ Цена не может быть отрицательной")
+            return
+        
+        # Обновляем TARIFFS в config.py
+        import config
+        import os
+        
+        config.TARIFFS[tariff_days] = {
+            "price": base_price,
+            "base_devices": 1,
+            "device_price": device_price
+        }
+        
+        # Сохраняем в файл .env или config.py
+        with open("config.py", "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        
+        with open("config.py", "w", encoding="utf-8") as f:
+            for line in lines:
+                if line.strip().startswith("TARIFFS = {"):
+                    # Перезаписываем словарь TARIFFS
+                    f.write("TARIFFS = {\n")
+                    for days, info in config.TARIFFS.items():
+                        f.write(f"    {days}: {{\"price\": {info['price']}, \"base_devices\": 1, \"device_price\": {info['device_price']}}},\n")
+                    f.write("}\n")
+                else:
+                    f.write(line)
+        
+        # Обновляем также в db_manager.py для init_default_data
+        from database.models import TariffConfig
+        from database.db_manager import async_session_maker
+        from sqlalchemy import update
+        
+        async with async_session_maker() as session:
+            await session.execute(
+                update(TariffConfig)
+                .where(TariffConfig.days == tariff_days)
+                .values(base_price=base_price, device_price=device_price)
+            )
+            await session.commit()
+        
+        await message.answer(
+            f"✅ <b>Тариф обновлён!</b>\n\n"
+            f"📅 {tariff_days} дней\n"
+            f"💰 Базовая цена: {base_price} ₽\n"
+            f"➕ Цена за устройство: {device_price} ₽\n\n"
+            f"Изменения вступят в силу после перезапуска бота.",
+            parse_mode="HTML"
+        )
+        
+        await state.clear()
+        
+    except ValueError:
+        await message.answer("❌ Ошибка: введите числа через запятую")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+
 @router.callback_query(lambda c: c.data == "admin_panel")
 async def back_to_admin_panel(callback: CallbackQuery):
     """Назад в админ-панель"""
@@ -993,6 +1140,7 @@ async def back_to_admin_panel(callback: CallbackQuery):
         [InlineKeyboardButton(text="💱 Курс USD", callback_data="admin_currency")],
         [InlineKeyboardButton(text="🎫 Создать купон", callback_data="admin_create_coupon")],
         [InlineKeyboardButton(text="➕ Пополнить баланс", callback_data="admin_add_balance")],
+        [InlineKeyboardButton(text="💸 Управление тарифами", callback_data="admin_edit_tariffs")],
         [InlineKeyboardButton(text="📢 Рассылка", callback_data="admin_rass")],
         [InlineKeyboardButton(text="📋 Список купонов", callback_data="admin_list_coupons")]
     ])

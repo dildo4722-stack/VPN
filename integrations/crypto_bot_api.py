@@ -10,8 +10,6 @@ logger = logging.getLogger(__name__)
 
 
 class CryptoBotAPI:
-    """Интеграция с Crypto Pay API (@send) - прямая работа с API"""
-    
     def __init__(self):
         if CRYPTOPAY_TESTNET:
             self.base_url = "https://testnet-pay.crypt.bot/api"
@@ -25,7 +23,6 @@ class CryptoBotAPI:
         self.session = None
     
     async def _request(self, method: str, endpoint: str, data: Dict = None) -> Dict:
-        """Выполнение запроса к API"""
         if self.session is None:
             self.session = aiohttp.ClientSession()
         
@@ -36,7 +33,7 @@ class CryptoBotAPI:
                 result = await response.json()
                 
                 if response.status == 401:
-                    logger.error(f"Ошибка 401: Неверный токен API. Проверьте CRYPTOPAY_TOKEN")
+                    logger.error(f"Ошибка 401: Неверный токен API")
                     return {"ok": False, "error": "Unauthorized"}
                 
                 if not result.get("ok"):
@@ -44,27 +41,13 @@ class CryptoBotAPI:
                     return {"ok": False, "error": result.get("error")}
                 
                 return result
-                
         except Exception as e:
             logger.error(f"Ошибка запроса: {e}")
             return {"ok": False, "error": str(e)}
     
-    async def get_me(self):
-        """Проверка токена"""
-        return await self._request("GET", "getMe")
-    
-    async def create_invoice(
-        self,
-        user_id: int,
-        amount_rub: float,
-        tariff_days: int,
-        devices_count: int,
-        usd_rate: float  
-    ) -> Optional[Dict[str, Any]]:
-        """Создание счета на оплату"""
+    async def create_invoice(self, user_id: int, amount_rub: float, tariff_days: int, devices_count: int, usd_rate: float) -> Optional[Dict[str, Any]]:
         try:
-            usdt_amount = Decimal(str(amount_rub)) / Decimal(str(usd_rate))
-            usdt_amount = round(usdt_amount, 2)
+            usdt_amount = round(Decimal(str(amount_rub)) / Decimal(str(usd_rate)), 2)
             
             import time
             payload = f"{user_id}_{tariff_days}_{devices_count}_{int(time.time())}"
@@ -82,7 +65,6 @@ class CryptoBotAPI:
             result = await self._request("POST", "createInvoice", data)
             
             if not result.get("ok"):
-                logger.error(f"Ошибка создания инвойса: {result}")
                 return {"success": False, "error": result.get("error")}
             
             invoice = result["result"]
@@ -97,8 +79,6 @@ class CryptoBotAPI:
                 devices_count=devices_count
             )
             
-            logger.info(f"Создан инвойс #{invoice['invoice_id']} на {usdt_amount} USDT")
-            
             return {
                 "success": True,
                 "invoice_id": invoice["invoice_id"],
@@ -106,13 +86,11 @@ class CryptoBotAPI:
                 "amount_usdt": float(usdt_amount),
                 "amount_rub": amount_rub
             }
-            
         except Exception as e:
-            logger.error(f"Ошибка создания инвойса: {e}")
+            logger.error(f"Ошибка: {e}")
             return {"success": False, "error": str(e)}
     
     async def check_payment(self, invoice_id: int) -> Dict[str, Any]:
-        """Проверка статуса оплаты"""
         try:
             result = await self._request("GET", f"getInvoices?invoice_ids={invoice_id}")
             
@@ -128,7 +106,6 @@ class CryptoBotAPI:
             
             if status == "paid":
                 await update_payment_status(str(invoice_id), "success")
-                
                 payload = invoice.get("payload", "")
                 parts = payload.split("_")
                 
@@ -141,14 +118,12 @@ class CryptoBotAPI:
                         "devices_count": int(parts[2])
                     }
                 return {"status": "paid", "paid": True}
-            
             elif status == "expired":
                 return {"status": "expired", "paid": False}
             else:
                 return {"status": "active", "paid": False}
-                
         except Exception as e:
-            logger.error(f"Ошибка проверки платежа: {e}")
+            logger.error(f"Ошибка: {e}")
             return {"status": "error", "paid": False}
     
     async def close(self):

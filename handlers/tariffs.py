@@ -28,6 +28,8 @@ from utils.text_formatter import format_tariff_info
 router = Router()
 temp_tariff_selection = {}
 temp_coupon = {}
+temp_rub_payment = {}  
+temp_subscription_payments = {}  
 
 
 @router.callback_query(lambda c: c.data == "extend_subscription")
@@ -317,53 +319,237 @@ async def pre_checkout_query(pre_checkout_query: PreCheckoutQuery):
 
 
 @router.message(F.successful_payment)
-async def successful_payment(message: Message):
-    """Обработка успешной оплаты Stars"""
+async def successful_deposit(message: Message):
+    """Обработка успешной оплаты Stars для пополнения"""
     payment = message.successful_payment
     payload = payment.invoice_payload
-    amount_rub = int(payment.total_amount) / 100 
+    amount = int(payment.total_amount)  # сумма в Stars
     
-    parts = payload.split("_")
-    if len(parts) >= 4 and parts[0] == "stars":
-        user_id = int(parts[1])
-        tariff_days = int(parts[2])
-        devices_count = int(parts[3])
+    from database.db_manager import get_user, update_user_balance_stars
+    from database.models import Payment
+    from database.db_manager import async_session_maker
+    
+    print(f"DEBUG successful_deposit: payload={payload}, amount={amount}")
+    
+    if payload.startswith("deposit_stars"):
+        parts = payload.split("_")
+        user_id = int(parts[2])
+        stars_amount = int(parts[3]) if len(parts) > 3 else amount
+        
+        print(f"DEBUG: user_id={user_id}, stars_amount={stars_amount}")
         
         if user_id == message.from_user.id:
-            user = await get_user(message.from_user.id)
+            user = await get_user(user_id)
             if user:
-                success = await activate_subscription_after_payment(
-                    user_id=user.id,
-                    tariff_days=tariff_days,
-                    devices_count=devices_count
-                )
+                # Начисляем Stars
+                await update_user_balance_stars(user.id, stars_amount)
                 
-                from services.referral_service import process_referral_payment
-                await process_referral_payment(message.from_user.id, amount_rub)
-
-                if success:
-                    await message.answer(
-                        "✅ <b>Оплата успешно подтверждена!</b>\n\n"
-                        f"🎉 Подписка активирована!\n"
-                        f"📅 Тариф: {tariff_days} дней\n"
-                        f"📱 Устройств: {devices_count}\n\n"
-                        "🔌 Используйте кнопку «Подключить устройство» в личном кабинете.",
-                        parse_mode="HTML"
+                # Сохраняем в историю
+                async with async_session_maker() as session:
+                    payment_record = Payment(
+                        user_id=user.id,
+                        amount=stars_amount,
+                        currency="STARS",
+                        payment_method="stars",
+                        status="success",
+                        external_id=payload,
+                        tariff_days=0,
+                        devices_count=0
                     )
-                    
-                    if message.from_user.id in temp_tariff_selection:
-                        del temp_tariff_selection[message.from_user.id]
-                else:
-                    await message.answer(
-                        "❌ Ошибка активации подписки. Обратитесь в поддержку."
-                    )
+                    session.add(payment_record)
+                    await session.commit()
+                
+                await message.answer(
+                    f"✅ <b>Баланс пополнен!</b>\n\n"
+                    f"⭐ Сумма: +{stars_amount} Stars",
+                    parse_mode="HTML"
+                )
+            else:
+                await message.answer("❌ Ошибка: пользователь не найден")
         else:
-            await message.answer(
-                "⚠️ Несоответствие пользователя. Пожалуйста, обратитесь в поддержку."
-            ) 
+            await message.answer("❌ Ошибка: несоответствие пользователя")
 
 
 @router.callback_query(lambda c: c.data == "back_to_tariffs")
 async def back_to_tariffs(callback: CallbackQuery):
     await callback.message.edit_text("📋 Выберите план подписки:", reply_markup=get_tariff_menu())
+    await callback.answer()
+
+@router.callback_query(lambda c: c.data.startswith("pay_rub_"))
+async def pay_with_rub(callback: CallbackQuery, state: FSMContext):
+    """Оплата подписки в рублях через Platega"""
+    amount_rub = float(callback.data.split("_")[2])
+    selection = temp_tariff_selection.get(callback.from_user.id)
+    
+    if not selection:
+        await callback.answer("Сессия истекла, выберите тариф заново", show_alert=True)
+        await callback.message.edit_text("📋 Выберите план подписки:", reply_markup=get_tariff_menu())
+        return
+    
+    # Сохраняем данные для последующей активации
+    temp_rub_payment[callback.from_user.id] = {
+        "tariff_days": selection["days"],
+        "devices_count": selection["devices"],
+        "amount_rub": amount_rub
+    }
+    
+    # Показываем выбор способа оплаты
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📱 СБП (QR-код)", callback_data=f"subscription_rub_method_2")],
+        [InlineKeyboardButton(text="🌍 Криптовалюта", callback_data=f"subscription_rub_method_13")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_tariffs")]
+    ])
+    
+    await callback.message.edit_text(
+        f"💳 <b>Оплата подписки в рублях</b>\n\n"
+        f"📅 Тариф: {selection['days']} дней\n"
+        f"📱 Устройств: {selection['devices']}\n"
+        f"💰 Сумма: {amount_rub:.2f} ₽\n\n"
+        f"Выберите способ оплаты:",
+        reply_markup=keyboard,
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data.startswith("subscription_rub_method_"))
+async def subscription_rub_process_payment(callback: CallbackQuery, state: FSMContext):
+    """Обработка оплаты подписки через Platega"""
+    method_id = int(callback.data.split("_")[3])
+    
+    payment_data = temp_rub_payment.get(callback.from_user.id)
+    
+    if not payment_data:
+        await callback.answer("Ошибка: попробуйте снова", show_alert=True)
+        return
+    
+    rub_amount = payment_data["amount_rub"]
+    tariff_days = payment_data["tariff_days"]
+    devices_count = payment_data["devices_count"]
+    
+    from services.platega_service import platega
+    
+    order_id = f"sub_{callback.from_user.id}_{int(time.time())}"
+    
+    result = await platega.create_invoice(
+        amount=rub_amount,
+        order_id=order_id,
+        description=f"Оплата подписки VPN на {tariff_days} дней",
+        telegram_id=callback.from_user.id,
+        payment_method=method_id
+    )
+    
+    if result.get("status") == "success":
+        # 👇 ИСПРАВЛЕНО: используем transaction_id (UUID) как ключ
+        transaction_id = result["transaction_id"]
+        
+        temp_subscription_payments[transaction_id] = {
+            "user_id": callback.from_user.id,
+            "amount": rub_amount,
+            "tariff_days": tariff_days,
+            "devices_count": devices_count,
+            "payment_method": "platega",
+            "order_id": order_id
+        }
+        
+        # Очищаем временные данные
+        if callback.from_user.id in temp_rub_payment:
+            del temp_rub_payment[callback.from_user.id]
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="💳 Оплатить", url=result['payment_url'])],
+            [InlineKeyboardButton(text="✅ Я оплатил", callback_data=f"check_subscription_platega_{transaction_id}")],  # 👈 transaction_id
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_tariffs")]
+        ])
+        
+        method_names = {
+            2: "СБП (QR-код)",
+            11: "Банковская карта",
+            13: "Криптовалюта",
+            12: "Международная карта"
+        }
+        method_name = method_names.get(method_id, "Оплата")
+        
+        await callback.message.edit_text(
+            f"💳 <b>Счет на оплату подписки</b>\n\n"
+            f"📅 Тариф: {tariff_days} дней\n"
+            f"📱 Устройств: {devices_count}\n"
+            f"💰 Сумма: {rub_amount:.2f} ₽\n"
+            f"💳 Способ: {method_name}\n\n"
+            f"1. Нажмите «Оплатить»\n"
+            f"2. Оплатите удобным способом\n"
+            f"3. Нажмите «Я оплатил»\n\n"
+            f"<i>Счет действителен 1 час</i>",
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    else:
+        error_msg = result.get('message', 'Неизвестная ошибка')
+        await callback.message.edit_text(
+            f"❌ Ошибка создания платежа: {error_msg}\n\n"
+            f"Попробуйте другой способ оплаты.",
+            reply_markup=get_back_button("back_to_tariffs", "◀️ Назад")
+        )
+    
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data.startswith("check_subscription_platega_"))
+async def check_subscription_platega_payment(callback: CallbackQuery):
+    """Проверка оплаты подписки через Platega"""
+    transaction_id = callback.data.split("_")[3]  # теперь это UUID
+    
+    from services.platega_service import platega
+    from services.payment_service import activate_subscription_after_payment
+    
+    await callback.message.edit_text("⏳ Проверяем статус платежа...", reply_markup=None)
+    
+    result = await platega.check_payment(transaction_id)
+    
+    if result.get("status") == "success" and result.get("paid"):
+        payment_data = temp_subscription_payments.get(transaction_id)  # ищем по UUID
+        if payment_data:
+            success = await activate_subscription_after_payment(
+                user_id=payment_data["user_id"],
+                tariff_days=payment_data["tariff_days"],
+                devices_count=payment_data["devices_count"]
+            )
+            
+            if success:
+                await callback.message.edit_text(
+                    f"✅ <b>Подписка оплачена!</b>\n\n"
+                    f"🎉 Подписка активирована!\n"
+                    f"📅 Тариф: {payment_data['tariff_days']} дней\n"
+                    f"📱 Устройств: {payment_data['devices_count']}\n\n"
+                    f"🔌 Используйте кнопку «Подключить устройство» в личном кабинете.",
+                    reply_markup=get_back_button("back_to_profile", "◀️ В личный кабинет"),
+                    parse_mode="HTML"
+                )
+                
+                # Очищаем данные
+                if transaction_id in temp_subscription_payments:
+                    del temp_subscription_payments[transaction_id]
+                if callback.from_user.id in temp_tariff_selection:
+                    del temp_tariff_selection[callback.from_user.id]
+            else:
+                await callback.message.edit_text(
+                    "❌ Ошибка активации подписки. Обратитесь в поддержку.",
+                    reply_markup=get_back_button("back_to_profile", "◀️ Назад")
+                )
+    elif result.get("transaction_status") == "PENDING":
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Проверить еще раз", callback_data=f"check_subscription_platega_{transaction_id}")],
+            [InlineKeyboardButton(text="◀️ Назад", callback_data="back_to_tariffs")]
+        ])
+        await callback.message.edit_text(
+            "⏳ Платеж еще не обработан. Оплатите и нажмите «Проверить еще раз».",
+            reply_markup=keyboard,
+            parse_mode="HTML"
+        )
+    else:
+        await callback.message.edit_text(
+            "❌ Платеж не найден или истек",
+            reply_markup=get_back_button("back_to_tariffs", "◀️ Назад")
+        )
+    
     await callback.answer()

@@ -37,24 +37,14 @@ def format_subscription_created_message(
 
 
 def format_profile_message(user, subscription) -> str:
-    from database.db_manager import get_usd_rate
-    import asyncio
-    
-    try:
-        loop = asyncio.get_event_loop()
-        usd_rate = loop.run_until_complete(get_usd_rate())
-    except:
-        usd_rate = 78.3
-    
-    rub = user.balance
-    usdt = rub / usd_rate if usd_rate > 0 else 0
-    stars = int(rub)
+    # Используем только рублёвый баланс
+    rub = getattr(user, 'balance_rub', 0)
     
     profile_text = (
         f"👤 <b>ПРОФИЛЬ</b>\n"
         f"<blockquote>📝 Имя: {user.first_name or user.username or 'Пользователь'}\n"
         f"🆔 ID: <code>{user.telegram_id}</code>\n"
-        f"💰 Баланс: <b>{rub:.2f} ₽</b> | ⭐ {stars} Stars | 💎 {usdt:.2f} USDT</blockquote>\n\n"
+        f"💰 Баланс: <b>{rub:.2f} ₽</b></blockquote>\n\n"
     )
     
     if subscription:
@@ -89,6 +79,8 @@ def format_profile_message(user, subscription) -> str:
         )
     
     return profile_text
+
+
 def format_tariff_info(tariff_days: int, base_price: float, device_price: float, max_devices: int) -> str:
     return (
         f"📅 <b>{tariff_days} дней</b>\n"
